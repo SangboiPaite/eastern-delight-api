@@ -1,0 +1,362 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  ADMIN
+  STAFF
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+  DEACTIVATED
+}
+
+enum ServicePermission {
+  BILLING
+  PRODUCTS
+  CUSTOMERS
+  COURIER
+  REPORTS
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  CANCELLED
+}
+
+enum CourierPaymentMethod {
+  CASH
+  UPI
+  CARD
+  OTHER
+}
+
+enum CourierPaymentStatus {
+  PENDING
+  PAID
+  REFUNDED
+}
+
+enum CourierBookingStatus {
+  BOOKED
+  PICKED_UP
+  IN_TRANSIT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  RETURNED
+}
+
+enum InventoryMovementType {
+  SALE
+  PURCHASE
+  ADJUSTMENT
+  RETURN
+  DAMAGE
+  OPENING_STOCK
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  name         String
+  mobile       String     @unique
+  passwordHash String
+  role         UserRole   @default(STAFF)
+  status       UserStatus @default(PENDING)
+  approvedAt   DateTime?
+  approvedById String?    @db.Uuid
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  approvedBy         User?                   @relation("UserApproval", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedUsers      User[]                  @relation("UserApproval")
+  permissions        UserServicePermission[]
+  invoices           Invoice[]
+  courierBookings    CourierBooking[]
+  courierEvents      CourierEvent[]          @relation("CourierEventCreatedBy")
+  auditLogs          AuditLog[]              @relation("AuditActor")
+  inventoryMovements InventoryMovement[]     @relation("InventoryMovementCreatedBy")
+}
+
+model UserServicePermission {
+  id        String            @id @default(uuid()) @db.Uuid
+  userId    String            @db.Uuid
+  service   ServicePermission
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, service])
+}
+
+model Category {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+}
+
+model Product {
+  id           String   @id @default(uuid()) @db.Uuid
+  categoryId   String   @db.Uuid
+  name         String
+  sku          String?  @unique
+  description  String?
+  sellingPrice Decimal  @db.Decimal(12, 2)
+  gstRate      Decimal  @db.Decimal(5, 2)
+  stockQty     Decimal  @default(0) @db.Decimal(12, 3)
+  unit         String   @default("pcs")
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  category           Category            @relation(fields: [categoryId], references: [id])
+  invoiceItems       InvoiceItem[]
+  inventoryMovements InventoryMovement[]
+
+  @@index([categoryId])
+  @@index([isActive])
+}
+
+model Customer {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  mobile    String   @unique
+  email     String?
+  address   String?
+  gstin     String?
+  state     String?
+  stateCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices Invoice[]
+}
+
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  invoiceNumber String        @unique
+  customerId    String?       @db.Uuid
+  createdById   String        @db.Uuid
+  status        InvoiceStatus @default(ISSUED)
+  paymentMethod PaymentMethod
+  paymentStatus PaymentStatus @default(PAID)
+
+  subtotal       Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxableAmount  Decimal @db.Decimal(12, 2)
+  cgstAmount     Decimal @default(0) @db.Decimal(12, 2)
+  sgstAmount     Decimal @default(0) @db.Decimal(12, 2)
+  igstAmount     Decimal @default(0) @db.Decimal(12, 2)
+  totalTax       Decimal @default(0) @db.Decimal(12, 2)
+  grandTotal     Decimal @db.Decimal(12, 2)
+
+  sellerName      String
+  sellerGstin     String?
+  sellerAddress   String
+  sellerState     String
+  sellerStateCode String
+  sellerMobile    String?
+  sellerEmail     String?
+
+  customerNameSnapshot      String?
+  customerMobileSnapshot    String?
+  customerAddressSnapshot   String?
+  customerGstinSnapshot     String?
+  customerStateSnapshot     String?
+  customerStateCodeSnapshot String?
+
+  issuedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  customer  Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy User          @relation(fields: [createdById], references: [id])
+  items     InvoiceItem[]
+  payment   Payment?
+
+  @@index([customerId])
+  @@index([createdById])
+  @@index([status])
+  @@index([issuedAt])
+}
+
+model InvoiceItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  invoiceId     String  @db.Uuid
+  productId     String  @db.Uuid
+  productName   String
+  quantity      Decimal @db.Decimal(12, 3)
+  unitPrice     Decimal @db.Decimal(12, 2)
+  gstRate       Decimal @db.Decimal(5, 2)
+  taxableAmount Decimal @db.Decimal(12, 2)
+  cgstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  sgstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  igstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  totalAmount   Decimal @db.Decimal(12, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  invoiceId      String        @unique @db.Uuid
+  amount         Decimal       @db.Decimal(12, 2)
+  method         PaymentMethod
+  status         PaymentStatus @default(PAID)
+  transactionRef String?
+  paidAt         DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+}
+
+model CourierBooking {
+  id            String @id @default(uuid()) @db.Uuid
+  bookingNumber String @unique
+  createdById   String @db.Uuid
+
+  senderName    String
+  senderMobile  String
+  senderAddress String
+
+  receiverName    String
+  receiverMobile  String
+  receiverAddress String
+
+  weightKg      Decimal              @db.Decimal(10, 3)
+  charge        Decimal              @db.Decimal(12, 2)
+  paymentMethod CourierPaymentMethod
+  paymentStatus CourierPaymentStatus @default(PAID)
+  status        CourierBookingStatus @default(BOOKED)
+
+  trackingCodeHash String
+  publicNote       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy User           @relation(fields: [createdById], references: [id])
+  events    CourierEvent[]
+
+  @@index([createdById])
+  @@index([status])
+  @@index([senderMobile])
+  @@index([receiverMobile])
+  @@index([createdAt])
+}
+
+model CourierEvent {
+  id           String               @id @default(uuid()) @db.Uuid
+  bookingId    String               @db.Uuid
+  status       CourierBookingStatus
+  publicNote   String?
+  internalNote String?
+  createdById  String?              @db.Uuid
+  createdAt    DateTime             @default(now())
+
+  booking   CourierBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  createdBy User?          @relation("CourierEventCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([bookingId, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  action     String
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+}
+
+model InventoryMovement {
+  id            String                @id @default(uuid()) @db.Uuid
+  productId     String                @db.Uuid
+  type          InventoryMovementType
+  quantity      Decimal               @db.Decimal(12, 3)
+  previousStock Decimal               @db.Decimal(12, 3)
+  newStock      Decimal               @db.Decimal(12, 3)
+  referenceType String?
+  referenceId   String?
+  note          String?
+  createdById   String?               @db.Uuid
+  createdAt     DateTime              @default(now())
+
+  product   Product @relation(fields: [productId], references: [id])
+  createdBy User?   @relation("InventoryMovementCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([productId, createdAt])
+  @@index([createdById, createdAt])
+}
+
+model BusinessProfile {
+  id            String   @id @default(uuid()) @db.Uuid
+  businessName  String
+  gstin         String?  @unique
+  address       String
+  state         String
+  stateCode     String
+  mobile        String?
+  email         String?
+  logoUrl       String?
+  invoicePrefix String   @default("INV-")
+  courierPrefix String   @default("CR-")
+  invoiceFooter String?
+  courierFooter String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model NumberSequence {
+  id           String   @id @default(uuid()) @db.Uuid
+  key          String   @unique
+  currentValue Int      @default(0)
+  updatedAt    DateTime @updatedAt
+}
+
+model IdempotencyKey {
+  id           String    @id @default(uuid()) @db.Uuid
+  key          String    @unique
+  scope        String
+  responseHash String?
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime?
+
+  @@index([scope, createdAt])
+}

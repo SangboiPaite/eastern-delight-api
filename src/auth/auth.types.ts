@@ -17,6 +17,10 @@ export type AuthTokenResponse = {
   user: AuthUserResponse;
 };
 
+export type AuthLogoutResponse = {
+  success: true;
+};
+
 export function toAuthAppRole(role: 'ADMIN' | 'STAFF'): AuthAppRole {
   return role === 'ADMIN' ? 'admin' : 'staff';
 }

@@ -1,4 +1,4 @@
-import { JwtModule, JwtService } from '@nestjs/jwt';
+import { JwtModule, JwtService, type JwtSignOptions } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
 import { UnauthorizedException } from '@nestjs/common';
 import { TokenService } from './token.service.js';
@@ -16,7 +16,9 @@ const claims: AccessTokenClaims = {
 describe('TokenService', () => {
   let service: TokenService;
 
-  async function createService(expiresIn = '15m'): Promise<TokenService> {
+  async function createService(
+    expiresIn: JwtSignOptions['expiresIn'] = '15m',
+  ): Promise<TokenService> {
     const module = await Test.createTestingModule({
       imports: [
         JwtModule.register({

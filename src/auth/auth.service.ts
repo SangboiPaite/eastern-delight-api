@@ -12,7 +12,9 @@ import {
   toAuthAppRole,
   type AuthLogoutResponse,
   type AuthTokenResponse,
+  type AuthUserResponse,
 } from './auth.types.js';
+import type { CurrentUserContext } from './current-user.js';
 import { expiryFromDuration } from './duration.js';
 import type { LoginDto } from './dto/login.dto.js';
 import type { RefreshTokenDto } from './dto/refresh-token.dto.js';
@@ -30,6 +32,13 @@ const USER_LOGIN_SELECT = {
   role: true,
   status: true,
   passwordHash: true,
+} as const;
+
+const CURRENT_USER_SELECT = {
+  id: true,
+  name: true,
+  role: true,
+  status: true,
 } as const;
 
 const REFRESH_SESSION_AUTH_SELECT = {
@@ -194,6 +203,31 @@ export class AuthService {
     }
 
     return { success: true };
+  }
+
+  async getCurrentUser(
+    current: CurrentUserContext,
+  ): Promise<AuthUserResponse> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: current.id },
+      select: CURRENT_USER_SELECT,
+    });
+
+    if (!user || user.status !== 'ACTIVE') {
+      this.rejectCredentials();
+    }
+
+    const organizationId = await this.requireSingleBusinessProfileId();
+    if (organizationId !== current.organizationId) {
+      this.rejectCredentials();
+    }
+
+    return {
+      id: user.id,
+      organizationId,
+      role: toAuthAppRole(user.role),
+      name: user.name,
+    };
   }
 
   private async requireSingleBusinessProfileId(): Promise<string> {

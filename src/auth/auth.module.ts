@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtModule, type JwtSignOptions } from '@nestjs/jwt';
 import type { AppConfiguration } from '../config/configuration.js';
 import { DatabaseModule } from '../database/database.module.js';
+import { AccessTokenGuard } from './access-token.guard.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { PasswordService } from './password.service.js';
@@ -24,7 +25,7 @@ import { TokenService } from './token.service.js';
     }),
   ],
   controllers: [AuthController],
-  providers: [PasswordService, TokenService, AuthService],
-  exports: [PasswordService, TokenService, AuthService],
+  providers: [PasswordService, TokenService, AuthService, AccessTokenGuard],
+  exports: [PasswordService, TokenService, AuthService, AccessTokenGuard],
 })
 export class AuthModule {}

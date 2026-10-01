@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import type { AppConfiguration } from '../config/configuration.js';
 import { AuthService } from './auth.service.js';
 import { INVALID_CREDENTIALS } from './auth.types.js';
+import type { CurrentUserContext } from './current-user.js';
 import type { LoginDto } from './dto/login.dto.js';
 import { PasswordService } from './password.service.js';
 import { hashRefreshToken } from './refresh-token.js';
@@ -52,6 +53,17 @@ function activeRefreshSession(
       role,
       status,
     },
+  };
+}
+
+function currentUser(
+  role: CurrentUserContext['role'] = 'ADMIN',
+  organizationId = BUSINESS_PROFILE_ID,
+): CurrentUserContext {
+  return {
+    id: USER_ID,
+    organizationId,
+    role,
   };
 }
 
@@ -546,6 +558,102 @@ describe('AuthService', () => {
       expect(JSON.stringify(prisma.refreshSession.findUnique.mock.calls)).not.toContain(
         'missing-refresh-token',
       );
+    });
+  });
+
+  describe('getCurrentUser', () => {
+    function expectCurrentUserSelect(): void {
+      expect(prisma.user.findUnique).toHaveBeenCalledWith({
+        where: { id: USER_ID },
+        select: {
+          id: true,
+          name: true,
+          role: true,
+          status: true,
+        },
+      });
+      const query = prisma.user.findUnique.mock.calls[0]?.[0] as {
+        select: Record<string, unknown>;
+      };
+      expect(query.select).not.toHaveProperty('passwordHash');
+      expect(query.select).not.toHaveProperty('mobile');
+      expect(query.select).not.toHaveProperty('permissions');
+      expect(query.select).not.toHaveProperty('refreshSessions');
+    }
+
+    it('returns an active admin with the frontend admin role', async () => {
+      const result = await service.getCurrentUser(currentUser('ADMIN'));
+
+      expectCurrentUserSelect();
+      expect(result).toEqual({
+        id: USER_ID,
+        organizationId: BUSINESS_PROFILE_ID,
+        role: 'admin',
+        name: 'Ada',
+      });
+      expect(Object.keys(result).sort()).toEqual([
+        'id',
+        'name',
+        'organizationId',
+        'role',
+      ]);
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(JSON.stringify(result)).not.toMatch(
+        /passwordHash|permissions|accessToken|refreshToken|refreshSessions/i,
+      );
+    });
+
+    it('returns an active staff user with the frontend staff role', async () => {
+      prisma.user.findUnique.mockResolvedValue(
+        userRow({ role: 'STAFF', name: 'Priya' }),
+      );
+
+      const result = await service.getCurrentUser(currentUser('STAFF'));
+
+      expectCurrentUserSelect();
+      expect(result).toEqual({
+        id: USER_ID,
+        organizationId: BUSINESS_PROFILE_ID,
+        role: 'staff',
+        name: 'Priya',
+      });
+      expect(result).not.toHaveProperty('passwordHash');
+    });
+
+    it('returns Invalid credentials for an unknown user', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      try {
+        await service.getCurrentUser(currentUser());
+        throw new Error('expected getCurrentUser to fail');
+      } catch (error) {
+        expectInvalidCredentials(error);
+      }
+    });
+
+    const inactiveStatuses = ['PENDING', 'REJECTED', 'DEACTIVATED'] as const;
+
+    it.each(inactiveStatuses)(
+      'returns Invalid credentials for a %s user',
+      async (status) => {
+        prisma.user.findUnique.mockResolvedValue(userRow({ status }));
+
+        try {
+          await service.getCurrentUser(currentUser());
+          throw new Error('expected getCurrentUser to fail');
+        } catch (error) {
+          expectInvalidCredentials(error);
+        }
+      },
+    );
+
+    it('returns Invalid credentials when the token organization does not match', async () => {
+      try {
+        await service.getCurrentUser(currentUser('ADMIN', 'other-organization'));
+        throw new Error('expected getCurrentUser to fail');
+      } catch (error) {
+        expectInvalidCredentials(error);
+      }
     });
   });
 });

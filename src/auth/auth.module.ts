@@ -7,6 +7,7 @@ import { AccessTokenGuard } from './access-token.guard.js';
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { PasswordService } from './password.service.js';
+import { ServicePermissionGuard } from './service-permission.guard.js';
 import { TokenService } from './token.service.js';
 
 @Module({
@@ -25,7 +26,19 @@ import { TokenService } from './token.service.js';
     }),
   ],
   controllers: [AuthController],
-  providers: [PasswordService, TokenService, AuthService, AccessTokenGuard],
-  exports: [PasswordService, TokenService, AuthService, AccessTokenGuard],
+  providers: [
+    PasswordService,
+    TokenService,
+    AuthService,
+    AccessTokenGuard,
+    ServicePermissionGuard,
+  ],
+  exports: [
+    PasswordService,
+    TokenService,
+    AuthService,
+    AccessTokenGuard,
+    ServicePermissionGuard,
+  ],
 })
 export class AuthModule {}

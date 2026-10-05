@@ -11,6 +11,7 @@ import { PasswordService } from '../auth/password.service.js';
 import { PrismaService } from '../database/prisma.service.js';
 import type { CreateUserDto } from './dto/create-user.dto.js';
 import type { ListUsersDto } from './dto/list-users.dto.js';
+import type { UpdateUserDto } from './dto/update-user.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -64,6 +65,17 @@ function isUserMobileConflict(error: unknown): boolean {
     return target.includes('mobile');
   }
   return target === 'mobile';
+}
+
+function isMissingUser(error: unknown): boolean {
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+    error.code !== 'P2025'
+  ) {
+    return false;
+  }
+  const modelName = error.meta?.modelName;
+  return modelName === undefined || modelName === 'User';
 }
 
 type UserStatus = UserResponse['status'];
@@ -263,6 +275,84 @@ export class UsersService {
     } catch (error) {
       if (isUserMobileConflict(error)) {
         throw new ConflictException(MOBILE_ALREADY_REGISTERED);
+      }
+      throw error;
+    }
+  }
+
+  async updateUser(
+    id: string,
+    dto: UpdateUserDto,
+    currentUser: CurrentUserContext,
+  ): Promise<UserResponse> {
+    if (dto.role !== undefined && currentUser.id === id) {
+      throw new ForbiddenException();
+    }
+
+    const existing = await this.prisma.user.findUnique({
+      where: { id },
+      select: USER_READ_SELECT,
+    });
+    if (!existing) {
+      throw new NotFoundException(USER_NOT_FOUND);
+    }
+
+    if (
+      dto.name === undefined &&
+      dto.mobile === undefined &&
+      dto.role === undefined &&
+      dto.password === undefined
+    ) {
+      return toUserResponse(existing);
+    }
+
+    const data: {
+      name?: string;
+      mobile?: string;
+      role?: UserResponse['role'];
+      passwordHash?: string;
+    } = {};
+    if (dto.name !== undefined) {
+      data.name = dto.name;
+    }
+    if (dto.mobile !== undefined) {
+      data.mobile = normalizeMobile(dto.mobile);
+    }
+    if (dto.role !== undefined) {
+      data.role = dto.role;
+    }
+    if (dto.password !== undefined) {
+      data.passwordHash = await this.passwords.hash(dto.password);
+    }
+
+    try {
+      const user =
+        dto.password === undefined
+          ? await this.prisma.user.update({
+              where: { id },
+              data,
+              select: USER_READ_SELECT,
+            })
+          : await this.prisma.$transaction(async (tx) => {
+              const revokedAt = new Date();
+              const updated = await tx.user.update({
+                where: { id },
+                data,
+                select: USER_READ_SELECT,
+              });
+              await tx.refreshSession.updateMany({
+                where: { userId: id, revokedAt: null },
+                data: { revokedAt },
+              });
+              return updated;
+            });
+      return toUserResponse(user);
+    } catch (error) {
+      if (isUserMobileConflict(error)) {
+        throw new ConflictException(MOBILE_ALREADY_REGISTERED);
+      }
+      if (isMissingUser(error)) {
+        throw new NotFoundException(USER_NOT_FOUND);
       }
       throw error;
     }

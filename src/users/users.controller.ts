@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   UseGuards,
@@ -14,6 +15,7 @@ import { Roles } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 import { ListUsersDto } from './dto/list-users.dto.js';
+import { UpdateUserDto } from './dto/update-user.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -63,5 +65,14 @@ export class UsersController {
     @CurrentUser() currentUser: CurrentUserContext,
   ): Promise<UserResponse> {
     return this.users.deactivateUser(id, currentUser);
+  }
+
+  @Patch(':id')
+  update(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserDto,
+    @CurrentUser() currentUser: CurrentUserContext,
+  ): Promise<UserResponse> {
+    return this.users.updateUser(id, dto, currentUser);
   }
 }

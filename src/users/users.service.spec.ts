@@ -70,7 +70,7 @@ describe('UsersService', () => {
         permissions: [{ service: 'BILLING' }, { service: 'PRODUCTS' }],
       }),
     );
-    prisma.user.update.mockReset();
+    prisma.user.update.mockReset().mockResolvedValue(userRecord());
     prisma.user.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prisma.refreshSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prisma.refreshSession.delete.mockReset();
@@ -663,6 +663,347 @@ describe('UsersService', () => {
         failure,
       );
       expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateUser', () => {
+    function profileUpdate(): {
+      where: { id: string };
+      data: {
+        name?: string;
+        mobile?: string;
+        role?: string;
+        password?: string;
+        passwordHash?: string;
+        status?: string;
+        approvedAt?: Date | null;
+        approvedById?: string | null;
+        permissions?: unknown;
+      };
+      select: Record<string, unknown>;
+    } {
+      return prisma.user.update.mock.calls[0]?.[0] as {
+        where: { id: string };
+        data: {
+          name?: string;
+          mobile?: string;
+          role?: string;
+          password?: string;
+          passwordHash?: string;
+          status?: string;
+          approvedAt?: Date | null;
+          approvedById?: string | null;
+          permissions?: unknown;
+        };
+        select: Record<string, unknown>;
+      };
+    }
+
+    function expectProfileOnly(data: Record<string, unknown>): void {
+      expect(data).not.toHaveProperty('status');
+      expect(data).not.toHaveProperty('approvedAt');
+      expect(data).not.toHaveProperty('approvedById');
+      expect(data).not.toHaveProperty('permissions');
+      expect(data).not.toHaveProperty('password');
+    }
+
+    function expectSafeResult(
+      result: Awaited<ReturnType<UsersService['updateUser']>>,
+    ): void {
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('refreshSessions');
+      expect(JSON.stringify(result)).not.toMatch(
+        /passwordHash|refreshSessions|tokenHash/,
+      );
+    }
+
+    it('updates the name without touching sessions or protected fields', async () => {
+      prisma.user.update.mockResolvedValue(userRecord({ name: 'Ada Lovelace' }));
+
+      const result = await service.updateUser(
+        USER_ID,
+        { name: '  Ada Lovelace  ' },
+        admin(),
+      );
+
+      expect(profileUpdate()).toEqual({
+        where: { id: USER_ID },
+        data: { name: '  Ada Lovelace  ' },
+        select: expect.any(Object),
+      });
+      expectProfileOnly(profileUpdate().data);
+      expectSafeSelect(profileUpdate().select);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(result.name).toBe('Ada Lovelace');
+      expect(result.status).toBe('ACTIVE');
+      expectSafeResult(result);
+    });
+
+    it('normalizes and updates the mobile number', async () => {
+      prisma.user.update.mockResolvedValue(userRecord({ mobile: '9876543210' }));
+
+      const result = await service.updateUser(
+        USER_ID,
+        { mobile: '  9876543210  ' },
+        admin(),
+      );
+
+      expect(profileUpdate().data).toEqual({ mobile: '9876543210' });
+      expectProfileOnly(profileUpdate().data);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(result.mobile).toBe('9876543210');
+      expectSafeResult(result);
+    });
+
+    it('updates another user role without changing status or approval', async () => {
+      prisma.user.update.mockResolvedValue(userRecord({ role: 'ADMIN' }));
+
+      const result = await service.updateUser(
+        USER_ID,
+        { role: 'ADMIN' },
+        admin(),
+      );
+
+      expect(profileUpdate().data).toEqual({ role: 'ADMIN' });
+      expectProfileOnly(profileUpdate().data);
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(result.role).toBe('ADMIN');
+      expect(result.status).toBe('ACTIVE');
+      expectSafeResult(result);
+    });
+
+    it('hashes a password and revokes active refresh sessions in one transaction', async () => {
+      const order: string[] = [];
+      prisma.user.update.mockImplementation(async () => {
+        order.push('user.update');
+        return userRecord();
+      });
+      prisma.refreshSession.updateMany.mockImplementation(async () => {
+        order.push('refresh.revoke');
+        return { count: 2 };
+      });
+
+      const result = await service.updateUser(
+        USER_ID,
+        { password: '  secret  ' },
+        admin(),
+      );
+
+      expect(passwords.hash).toHaveBeenCalledWith('  secret  ');
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['user.update', 'refresh.revoke']);
+      expect(profileUpdate().data).toEqual({ passwordHash: 'hashed-password' });
+      expect(profileUpdate().data).not.toHaveProperty('password');
+      expectProfileOnly(profileUpdate().data);
+      expect(prisma.refreshSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: USER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+      expect(prisma.refreshSession.delete).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.deleteMany).not.toHaveBeenCalled();
+      expectSafeResult(result);
+    });
+
+    it('does not touch refresh sessions for a name, mobile, and role update', async () => {
+      await service.updateUser(
+        USER_ID,
+        { name: 'Ada', mobile: '9876543210', role: 'ADMIN' },
+        admin(),
+      );
+
+      expect(profileUpdate().data).toEqual({
+        name: 'Ada',
+        mobile: '9876543210',
+        role: 'ADMIN',
+      });
+      expectProfileOnly(profileUpdate().data);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(passwords.hash).not.toHaveBeenCalled();
+    });
+
+    it.each(['PENDING', 'ACTIVE', 'REJECTED', 'DEACTIVATED'] as const)(
+      'leaves a %s user in that status',
+      async (status) => {
+        prisma.user.findUnique.mockResolvedValue(userRecord({ status }));
+        prisma.user.update.mockResolvedValue(userRecord({ status }));
+
+        const result = await service.updateUser(
+          USER_ID,
+          { name: 'Ada' },
+          admin(),
+        );
+
+        expect(profileUpdate().data).toEqual({ name: 'Ada' });
+        expect(result.status).toBe(status);
+      },
+    );
+
+    it('lets an admin edit their own name', async () => {
+      await service.updateUser(USER_ID, { name: 'Ada' }, admin(USER_ID));
+
+      expect(profileUpdate().data).toEqual({ name: 'Ada' });
+      expect(prisma.user.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets an admin edit their own mobile', async () => {
+      await service.updateUser(
+        USER_ID,
+        { mobile: '  9000000000  ' },
+        admin(USER_ID),
+      );
+
+      expect(profileUpdate().data).toEqual({ mobile: '9000000000' });
+    });
+
+    it('lets an admin edit their own password and revokes their sessions', async () => {
+      await service.updateUser(
+        USER_ID,
+        { password: 'next-secret' },
+        admin(USER_ID),
+      );
+
+      expect(passwords.hash).toHaveBeenCalledWith('next-secret');
+      expect(profileUpdate().data).toEqual({ passwordHash: 'hashed-password' });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(prisma.refreshSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: USER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('returns 403 before mutation when an admin changes their own role', async () => {
+      await expect(
+        service.updateUser(
+          USER_ID,
+          { role: 'STAFF', name: 'Ada' },
+          admin(USER_ID),
+        ),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      await expect(
+        service.updateUser(USER_ID, { role: 'ADMIN' }, admin(USER_ID)),
+      ).rejects.toMatchObject({ status: 403 });
+      expect(prisma.user.findUnique).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the user does not exist', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.updateUser(USER_ID, { name: 'Ada' }, admin()),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.updateUser(USER_ID, { name: 'Ada' }, admin()),
+      ).rejects.toMatchObject({
+        status: 404,
+        message: 'User not found.',
+      });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the user disappears during the update', async () => {
+      const missing = new Prisma.PrismaClientKnownRequestError(
+        'Record to update not found.',
+        {
+          code: 'P2025',
+          clientVersion: '7.10.0',
+          meta: { modelName: 'User' },
+        },
+      );
+      prisma.user.update.mockRejectedValue(missing);
+
+      await expect(
+        service.updateUser(USER_ID, { name: 'Ada' }, admin()),
+      ).rejects.toMatchObject({
+        status: 404,
+        message: 'User not found.',
+      });
+    });
+
+    it('accepts the user current mobile without a duplicate conflict', async () => {
+      const result = await service.updateUser(
+        USER_ID,
+        { mobile: '9876543210' },
+        admin(),
+      );
+
+      expect(profileUpdate().data).toEqual({ mobile: '9876543210' });
+      expect(result.mobile).toBe('9876543210');
+    });
+
+    it('returns 409 when the mobile belongs to another user', async () => {
+      const conflict = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed on the fields: (`mobile`)',
+        {
+          code: 'P2002',
+          clientVersion: '7.10.0',
+          meta: { modelName: 'User', target: ['mobile'] },
+        },
+      );
+      prisma.user.update.mockRejectedValue(conflict);
+
+      await expect(
+        service.updateUser(USER_ID, { mobile: '9000000000' }, admin()),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.updateUser(USER_ID, { mobile: '9000000000' }, admin()),
+      ).rejects.toMatchObject({
+        status: 409,
+        message: 'Mobile number is already registered.',
+      });
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('propagates unrelated database errors', async () => {
+      const permissionConflict = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed',
+        {
+          code: 'P2002',
+          clientVersion: '7.10.0',
+          meta: {
+            modelName: 'UserServicePermission',
+            target: ['userId', 'service'],
+          },
+        },
+      );
+      prisma.user.update.mockRejectedValue(permissionConflict);
+
+      await expect(
+        service.updateUser(USER_ID, { name: 'Ada' }, admin()),
+      ).rejects.toBe(permissionConflict);
+
+      const unavailable = new Error('database unavailable');
+      prisma.user.update.mockRejectedValue(unavailable);
+      await expect(
+        service.updateUser(USER_ID, { password: 'secret' }, admin()),
+      ).rejects.toBe(unavailable);
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the current user for an empty patch without a mutation', async () => {
+      const result = await service.updateUser(USER_ID, {}, admin());
+
+      expect(result).toEqual({
+        id: USER_ID,
+        name: 'Ada',
+        mobile: '9876543210',
+        role: 'STAFF',
+        status: 'ACTIVE',
+        createdAt: CREATED_AT,
+        updatedAt: UPDATED_AT,
+        permissions: ['PRODUCTS', 'BILLING'],
+      });
+      expectSafeResult(result);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(passwords.hash).not.toHaveBeenCalled();
     });
   });
 });

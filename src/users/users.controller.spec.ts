@@ -17,6 +17,7 @@ import { RolesGuard } from '../auth/roles.guard.js';
 import { TokenService } from '../auth/token.service.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 import { ListUsersDto } from './dto/list-users.dto.js';
+import { UpdateUserDto } from './dto/update-user.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -50,6 +51,7 @@ describe('UsersController', () => {
     approveUser: vi.fn(),
     rejectUser: vi.fn(),
     deactivateUser: vi.fn(),
+    updateUser: vi.fn(),
   };
 
   async function controller(): Promise<UsersController> {
@@ -71,6 +73,7 @@ describe('UsersController', () => {
     users.approveUser.mockReset().mockResolvedValue(userResponse);
     users.rejectUser.mockReset().mockResolvedValue(userResponse);
     users.deactivateUser.mockReset().mockResolvedValue(userResponse);
+    users.updateUser.mockReset().mockResolvedValue(userResponse);
   });
 
   it('delegates GET /users to UsersService with the list query', async () => {
@@ -201,6 +204,33 @@ describe('UsersController', () => {
         UsersController.prototype.deactivate,
       ),
     ).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+  });
+
+  it('delegates PATCH /users/:id to UsersService', async () => {
+    const dto = {
+      name: 'Ada Lovelace',
+      mobile: '  9876543210  ',
+      role: 'ADMIN' as const,
+      password: '  secret  ',
+    };
+    const updated = { ...userResponse, name: 'Ada Lovelace' };
+    users.updateUser.mockResolvedValue(updated);
+
+    await expect(
+      (await controller()).update(USER_ID, dto, currentUser),
+    ).resolves.toEqual(updated);
+    expect(users.updateUser).toHaveBeenCalledWith(USER_ID, dto, currentUser);
+    expect(
+      Reflect.getMetadata(PATH_METADATA, UsersController.prototype.update),
+    ).toBe(':id');
+    expect(
+      Reflect.getMetadata(METHOD_METADATA, UsersController.prototype.update),
+    ).toBe(RequestMethod.PATCH);
     expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
     expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
       AccessTokenGuard,
@@ -362,6 +392,75 @@ describe('CreateUserDto', () => {
         { name: '', mobile: '9876543210', password: 'secret' },
         metadata,
       ),
+    ).rejects.toBeDefined();
+  });
+});
+
+describe('UpdateUserDto', () => {
+  const pipe = new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  });
+  const metadata: ArgumentMetadata = {
+    type: 'body',
+    metatype: UpdateUserDto,
+  };
+
+  it('accepts a partial update and keeps the password unchanged', async () => {
+    const dto = (await pipe.transform(
+      {
+        name: 'Ada Lovelace',
+        mobile: '9876543210',
+        role: 'ADMIN',
+        password: '  secret  ',
+      },
+      metadata,
+    )) as UpdateUserDto;
+
+    expect(dto.name).toBe('Ada Lovelace');
+    expect(dto.mobile).toBe('9876543210');
+    expect(dto.role).toBe('ADMIN');
+    expect(dto.password).toBe('  secret  ');
+  });
+
+  it('accepts an empty patch', async () => {
+    const dto = (await pipe.transform({}, metadata)) as UpdateUserDto;
+
+    expect(dto.name).toBeUndefined();
+    expect(dto.mobile).toBeUndefined();
+    expect(dto.role).toBeUndefined();
+    expect(dto.password).toBeUndefined();
+  });
+
+  it('rejects an invalid role', async () => {
+    await expect(
+      pipe.transform({ role: 'admin' }, metadata),
+    ).rejects.toBeDefined();
+  });
+
+  it('rejects protected user fields', async () => {
+    await expect(
+      pipe.transform({ status: 'ACTIVE' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ approvedAt: '2026-01-01' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ approvedById: USER_ID }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ passwordHash: 'hash' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ permissions: ['BILLING'] }, metadata),
+    ).rejects.toBeDefined();
+    await expect(pipe.transform({ id: USER_ID }, metadata)).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ createdAt: '2026-01-01' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ updatedAt: '2026-01-02' }, metadata),
     ).rejects.toBeDefined();
   });
 });

@@ -52,6 +52,10 @@ describe('UsersService', () => {
       delete: vi.fn(),
       deleteMany: vi.fn(),
     },
+    userServicePermission: {
+      deleteMany: vi.fn(),
+      createMany: vi.fn(),
+    },
     $transaction: vi.fn(),
   };
   const passwords = { hash: vi.fn() };
@@ -75,6 +79,12 @@ describe('UsersService', () => {
     prisma.refreshSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
     prisma.refreshSession.delete.mockReset();
     prisma.refreshSession.deleteMany.mockReset();
+    prisma.userServicePermission.deleteMany.mockReset().mockResolvedValue({
+      count: 2,
+    });
+    prisma.userServicePermission.createMany.mockReset().mockResolvedValue({
+      count: 1,
+    });
     prisma.$transaction.mockReset().mockImplementation(
       async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma),
     );
@@ -1004,6 +1014,144 @@ describe('UsersService', () => {
       expect(prisma.$transaction).not.toHaveBeenCalled();
       expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
       expect(passwords.hash).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('replaceUserPermissions', () => {
+    function permissionDelete(): { where: { userId: string } } {
+      return prisma.userServicePermission.deleteMany.mock.calls[0]?.[0] as {
+        where: { userId: string };
+      };
+    }
+
+    function permissionCreate(): {
+      data: { userId: string; service: string }[];
+    } {
+      return prisma.userServicePermission.createMany.mock.calls[0]?.[0] as {
+        data: { userId: string; service: string }[];
+      };
+    }
+
+    function expectAccountUntouched(): void {
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.user.updateMany).not.toHaveBeenCalled();
+      expect(prisma.user.create).not.toHaveBeenCalled();
+      expect(passwords.hash).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.delete).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.deleteMany).not.toHaveBeenCalled();
+    }
+
+    it('replaces the permission set and returns the safe user', async () => {
+      prisma.user.findUnique
+        .mockResolvedValueOnce({ id: USER_ID })
+        .mockResolvedValueOnce(
+          userRecord({
+            role: 'STAFF',
+            status: 'ACTIVE',
+            permissions: [{ service: 'CUSTOMERS' }, { service: 'REPORTS' }],
+          }),
+        );
+
+      const result = await service.replaceUserPermissions(USER_ID, {
+        permissions: ['REPORTS', 'CUSTOMERS'],
+      });
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(permissionDelete()).toEqual({ where: { userId: USER_ID } });
+      expect(permissionCreate()).toEqual({
+        data: [
+          { userId: USER_ID, service: 'REPORTS' },
+          { userId: USER_ID, service: 'CUSTOMERS' },
+        ],
+      });
+      expect(
+        permissionCreate().data.map((row) => Object.keys(row).sort()),
+      ).toEqual([
+        ['service', 'userId'],
+        ['service', 'userId'],
+      ]);
+      expect(result).toEqual({
+        id: USER_ID,
+        name: 'Ada',
+        mobile: '9876543210',
+        role: 'STAFF',
+        status: 'ACTIVE',
+        createdAt: CREATED_AT,
+        updatedAt: UPDATED_AT,
+        permissions: ['CUSTOMERS', 'REPORTS'],
+      });
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('refreshSessions');
+      expect(JSON.stringify(result)).not.toMatch(
+        /passwordHash|refreshSessions|tokenHash/,
+      );
+      expectAccountUntouched();
+    });
+
+    it('clears every permission when the submitted array is empty', async () => {
+      prisma.user.findUnique
+        .mockResolvedValueOnce({ id: USER_ID })
+        .mockResolvedValueOnce(userRecord({ permissions: [] }));
+
+      const result = await service.replaceUserPermissions(USER_ID, {
+        permissions: [],
+      });
+
+      expect(permissionDelete()).toEqual({ where: { userId: USER_ID } });
+      expect(prisma.userServicePermission.createMany).not.toHaveBeenCalled();
+      expect(result.permissions).toEqual([]);
+      expect(result.role).toBe('STAFF');
+      expect(result.status).toBe('ACTIVE');
+      expectAccountUntouched();
+    });
+
+    it('returns 404 when the user does not exist and writes no permissions', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.replaceUserPermissions(USER_ID, {
+          permissions: ['BILLING'],
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      await expect(
+        service.replaceUserPermissions(USER_ID, {
+          permissions: ['BILLING'],
+        }),
+      ).rejects.toMatchObject({
+        status: 404,
+        message: 'User not found.',
+      });
+      expect(prisma.userServicePermission.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.userServicePermission.createMany).not.toHaveBeenCalled();
+      expectAccountUntouched();
+    });
+
+    it('propagates a write failure from inside the transaction', async () => {
+      const failure = new Error('database unavailable');
+      prisma.userServicePermission.createMany.mockRejectedValue(failure);
+
+      await expect(
+        service.replaceUserPermissions(USER_ID, {
+          permissions: ['BILLING', 'PRODUCTS'],
+        }),
+      ).rejects.toBe(failure);
+      expect(prisma.userServicePermission.deleteMany).toHaveBeenCalledTimes(1);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expectAccountUntouched();
+    });
+
+    it('does not create permissions when deleting the previous set fails', async () => {
+      const failure = new Error('delete failed');
+      prisma.userServicePermission.deleteMany.mockRejectedValue(failure);
+
+      await expect(
+        service.replaceUserPermissions(USER_ID, {
+          permissions: ['BILLING'],
+        }),
+      ).rejects.toBe(failure);
+      expect(prisma.userServicePermission.createMany).not.toHaveBeenCalled();
+      expectAccountUntouched();
     });
   });
 });

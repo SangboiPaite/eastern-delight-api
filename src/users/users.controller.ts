@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -16,6 +17,7 @@ import { RolesGuard } from '../auth/roles.guard.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 import { ListUsersDto } from './dto/list-users.dto.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { UpdateUserPermissionsDto } from './dto/update-user-permissions.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -74,5 +76,13 @@ export class UsersController {
     @CurrentUser() currentUser: CurrentUserContext,
   ): Promise<UserResponse> {
     return this.users.updateUser(id, dto, currentUser);
+  }
+
+  @Put(':id/permissions')
+  replacePermissions(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserPermissionsDto,
+  ): Promise<UserResponse> {
+    return this.users.replaceUserPermissions(id, dto);
   }
 }

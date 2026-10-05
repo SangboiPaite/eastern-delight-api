@@ -12,6 +12,7 @@ import { PrismaService } from '../database/prisma.service.js';
 import type { CreateUserDto } from './dto/create-user.dto.js';
 import type { ListUsersDto } from './dto/list-users.dto.js';
 import type { UpdateUserDto } from './dto/update-user.dto.js';
+import type { UpdateUserPermissionsDto } from './dto/update-user-permissions.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -356,5 +357,42 @@ export class UsersService {
       }
       throw error;
     }
+  }
+
+  async replaceUserPermissions(
+    id: string,
+    dto: UpdateUserPermissionsDto,
+  ): Promise<UserResponse> {
+    const user = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.user.findUnique({
+        where: { id },
+        select: { id: true },
+      });
+      if (!existing) {
+        throw new NotFoundException(USER_NOT_FOUND);
+      }
+
+      await tx.userServicePermission.deleteMany({
+        where: { userId: id },
+      });
+      if (dto.permissions.length > 0) {
+        await tx.userServicePermission.createMany({
+          data: dto.permissions.map((service) => ({
+            userId: id,
+            service,
+          })),
+        });
+      }
+
+      const updated = await tx.user.findUnique({
+        where: { id },
+        select: USER_READ_SELECT,
+      });
+      if (!updated || !('name' in updated)) {
+        throw new NotFoundException(USER_NOT_FOUND);
+      }
+      return updated;
+    });
+    return toUserResponse(user);
   }
 }

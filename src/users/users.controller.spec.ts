@@ -18,6 +18,7 @@ import { TokenService } from '../auth/token.service.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 import { ListUsersDto } from './dto/list-users.dto.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { UpdateUserPermissionsDto } from './dto/update-user-permissions.dto.js';
 import type {
   UserListResponse,
   UserResponse,
@@ -52,6 +53,7 @@ describe('UsersController', () => {
     rejectUser: vi.fn(),
     deactivateUser: vi.fn(),
     updateUser: vi.fn(),
+    replaceUserPermissions: vi.fn(),
   };
 
   async function controller(): Promise<UsersController> {
@@ -74,6 +76,7 @@ describe('UsersController', () => {
     users.rejectUser.mockReset().mockResolvedValue(userResponse);
     users.deactivateUser.mockReset().mockResolvedValue(userResponse);
     users.updateUser.mockReset().mockResolvedValue(userResponse);
+    users.replaceUserPermissions.mockReset().mockResolvedValue(userResponse);
   });
 
   it('delegates GET /users to UsersService with the list query', async () => {
@@ -236,6 +239,43 @@ describe('UsersController', () => {
       AccessTokenGuard,
       RolesGuard,
     ]);
+  });
+
+  it('delegates PUT /users/:id/permissions to UsersService', async () => {
+    const dto = { permissions: ['BILLING' as const, 'PRODUCTS' as const] };
+    const replaced = {
+      ...userResponse,
+      permissions: ['BILLING' as const, 'PRODUCTS' as const],
+    };
+    users.replaceUserPermissions.mockResolvedValue(replaced);
+
+    await expect(
+      (await controller()).replacePermissions(USER_ID, dto),
+    ).resolves.toEqual(replaced);
+    expect(users.replaceUserPermissions).toHaveBeenCalledWith(USER_ID, dto);
+    expect(
+      Reflect.getMetadata(
+        PATH_METADATA,
+        UsersController.prototype.replacePermissions,
+      ),
+    ).toBe(':id/permissions');
+    expect(
+      Reflect.getMetadata(
+        METHOD_METADATA,
+        UsersController.prototype.replacePermissions,
+      ),
+    ).toBe(RequestMethod.PUT);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+    expect(
+      Reflect.getMetadata(
+        GUARDS_METADATA,
+        UsersController.prototype.replacePermissions,
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -461,6 +501,72 @@ describe('UpdateUserDto', () => {
     ).rejects.toBeDefined();
     await expect(
       pipe.transform({ updatedAt: '2026-01-02' }, metadata),
+    ).rejects.toBeDefined();
+  });
+});
+
+describe('UpdateUserPermissionsDto', () => {
+  const pipe = new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  });
+  const metadata: ArgumentMetadata = {
+    type: 'body',
+    metatype: UpdateUserPermissionsDto,
+  };
+
+  it('accepts a permission replacement, including an empty list', async () => {
+    const dto = (await pipe.transform(
+      { permissions: ['PRODUCTS', 'BILLING'] },
+      metadata,
+    )) as UpdateUserPermissionsDto;
+    const cleared = (await pipe.transform(
+      { permissions: [] },
+      metadata,
+    )) as UpdateUserPermissionsDto;
+
+    expect(dto.permissions).toEqual(['PRODUCTS', 'BILLING']);
+    expect(cleared.permissions).toEqual([]);
+  });
+
+  it('rejects duplicate or invalid permissions', async () => {
+    await expect(
+      pipe.transform({ permissions: ['BILLING', 'BILLING'] }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ permissions: ['INVOICES'] }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ permissions: 'BILLING' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(pipe.transform({}, metadata)).rejects.toBeDefined();
+  });
+
+  it('rejects user fields other than permissions', async () => {
+    await expect(
+      pipe.transform(
+        { permissions: ['BILLING'], role: 'ADMIN' },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        { permissions: ['BILLING'], status: 'ACTIVE' },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        { permissions: ['BILLING'], password: 'secret' },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        { permissions: ['BILLING'], approvedAt: '2026-01-01' },
+        metadata,
+      ),
     ).rejects.toBeDefined();
   });
 });

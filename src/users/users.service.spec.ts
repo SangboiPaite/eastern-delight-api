@@ -1,12 +1,26 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client.js';
+import type { CurrentUserContext } from '../auth/current-user.js';
 import { PasswordService } from '../auth/password.service.js';
 import { PrismaService } from '../database/prisma.service.js';
 import { UsersService } from './users.service.js';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
+const ADMIN_ID = '22222222-2222-4222-8222-222222222222';
 const CREATED_AT = new Date('2026-01-01T00:00:00.000Z');
 const UPDATED_AT = new Date('2026-01-02T00:00:00.000Z');
+
+function admin(id = ADMIN_ID): CurrentUserContext {
+  return {
+    id,
+    organizationId: '33333333-3333-4333-8333-333333333333',
+    role: 'ADMIN',
+  };
+}
 
 function userRecord(overrides: Record<string, unknown> = {}) {
   return {
@@ -30,7 +44,15 @@ describe('UsersService', () => {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       create: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
     },
+    refreshSession: {
+      updateMany: vi.fn(),
+      delete: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    $transaction: vi.fn(),
   };
   const passwords = { hash: vi.fn() };
   const service = new UsersService(
@@ -47,6 +69,14 @@ describe('UsersService', () => {
         passwordHash: 'hashed-password',
         permissions: [{ service: 'BILLING' }, { service: 'PRODUCTS' }],
       }),
+    );
+    prisma.user.update.mockReset();
+    prisma.user.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prisma.refreshSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prisma.refreshSession.delete.mockReset();
+    prisma.refreshSession.deleteMany.mockReset();
+    prisma.$transaction.mockReset().mockImplementation(
+      async (fn: (tx: typeof prisma) => Promise<unknown>) => fn(prisma),
     );
     passwords.hash.mockReset().mockResolvedValue('hashed-password');
   });
@@ -340,6 +370,299 @@ describe('UsersService', () => {
           password: 'secret',
         }),
       ).rejects.toBe(unavailable);
+    });
+  });
+
+  describe('user status changes', () => {
+    function statusUpdate(): {
+      where: { id: string; status: string };
+      data: {
+        status: string;
+        approvedAt?: Date | null;
+        approvedById?: string | null;
+      };
+    } {
+      return prisma.user.updateMany.mock.calls[0]?.[0] as {
+        where: { id: string; status: string };
+        data: {
+          status: string;
+          approvedAt?: Date | null;
+          approvedById?: string | null;
+        };
+      };
+    }
+
+    function sessionRevocation(): {
+      where: { userId: string; revokedAt: null };
+      data: { revokedAt: Date };
+    } {
+      return prisma.refreshSession.updateMany.mock.calls[0]?.[0] as {
+        where: { userId: string; revokedAt: null };
+        data: { revokedAt: Date };
+      };
+    }
+
+    function safeUser(status: string) {
+      return {
+        id: USER_ID,
+        name: 'Ada',
+        mobile: '9876543210',
+        role: 'STAFF',
+        status,
+        createdAt: CREATED_AT,
+        updatedAt: UPDATED_AT,
+        permissions: ['PRODUCTS', 'BILLING'],
+      };
+    }
+
+    function expectNoSessionDeletion(): void {
+      expect(prisma.refreshSession.delete).not.toHaveBeenCalled();
+      expect(prisma.refreshSession.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    }
+
+    describe('approveUser', () => {
+      it('approves a PENDING user and records the authenticated admin', async () => {
+        prisma.user.findUnique.mockResolvedValue(
+          userRecord({ status: 'ACTIVE' }),
+        );
+
+        const result = await service.approveUser(USER_ID, admin());
+
+        expect(statusUpdate().where).toEqual({
+          id: USER_ID,
+          status: 'PENDING',
+        });
+        expect(statusUpdate().data).toEqual({
+          status: 'ACTIVE',
+          approvedAt: expect.any(Date),
+          approvedById: ADMIN_ID,
+        });
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+        expect(result).toEqual(safeUser('ACTIVE'));
+        expect(result).not.toHaveProperty('passwordHash');
+        expect(result).not.toHaveProperty('refreshSessions');
+        expect(JSON.stringify(result)).not.toMatch(
+          /passwordHash|refreshSessions|tokenHash/,
+        );
+        expectNoSessionDeletion();
+      });
+
+      it('returns 404 when the user does not exist', async () => {
+        prisma.user.updateMany.mockResolvedValue({ count: 0 });
+        prisma.user.findUnique.mockResolvedValue(null);
+
+        await expect(service.approveUser(USER_ID, admin())).rejects.toMatchObject(
+          { status: 404, message: 'User not found.' },
+        );
+        await expect(
+          service.approveUser(USER_ID, admin()),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      });
+
+      it.each(['ACTIVE', 'REJECTED', 'DEACTIVATED'])(
+        'returns 409 when the user is %s',
+        async (status) => {
+          prisma.user.updateMany.mockResolvedValue({ count: 0 });
+          prisma.user.findUnique.mockResolvedValue(userRecord({ status }));
+
+          await expect(
+            service.approveUser(USER_ID, admin()),
+          ).rejects.toBeInstanceOf(ConflictException);
+          await expect(
+            service.approveUser(USER_ID, admin()),
+          ).rejects.toMatchObject({
+            status: 409,
+            message: 'User cannot be approved from the current status.',
+          });
+          expect(prisma.user.updateMany).toHaveBeenCalledTimes(2);
+          expect(prisma.user.update).not.toHaveBeenCalled();
+        },
+      );
+
+      it('returns 403 when an admin approves their own user', async () => {
+        await expect(
+          service.approveUser(ADMIN_ID, admin()),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(service.approveUser(ADMIN_ID, admin())).rejects.toMatchObject(
+          { status: 403 },
+        );
+        expect(prisma.user.updateMany).not.toHaveBeenCalled();
+        expect(prisma.user.findUnique).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('rejectUser', () => {
+      it('rejects a PENDING user, clears approval, and revokes refresh sessions', async () => {
+        prisma.user.findUnique.mockResolvedValue(
+          userRecord({ status: 'REJECTED' }),
+        );
+
+        const result = await service.rejectUser(USER_ID, admin());
+
+        expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+        expect(statusUpdate().where).toEqual({
+          id: USER_ID,
+          status: 'PENDING',
+        });
+        expect(statusUpdate().data).toEqual({
+          status: 'REJECTED',
+          approvedAt: null,
+          approvedById: null,
+        });
+        expect(sessionRevocation()).toEqual({
+          where: { userId: USER_ID, revokedAt: null },
+          data: { revokedAt: expect.any(Date) },
+        });
+        expect(result).toEqual(safeUser('REJECTED'));
+        expect(result).not.toHaveProperty('passwordHash');
+        expect(result).not.toHaveProperty('refreshSessions');
+        expectNoSessionDeletion();
+      });
+
+      it('returns 404 when the user does not exist', async () => {
+        prisma.user.updateMany.mockResolvedValue({ count: 0 });
+        prisma.user.findUnique.mockResolvedValue(null);
+
+        await expect(service.rejectUser(USER_ID, admin())).rejects.toMatchObject(
+          { status: 404, message: 'User not found.' },
+        );
+        expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+        expectNoSessionDeletion();
+      });
+
+      it.each(['ACTIVE', 'REJECTED', 'DEACTIVATED'])(
+        'returns 409 when the user is %s',
+        async (status) => {
+          prisma.user.updateMany.mockResolvedValue({ count: 0 });
+          prisma.user.findUnique.mockResolvedValue(userRecord({ status }));
+
+          await expect(service.rejectUser(USER_ID, admin())).rejects.toMatchObject(
+            {
+              status: 409,
+              message: 'User cannot be rejected from the current status.',
+            },
+          );
+          expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+          expect(prisma.user.update).not.toHaveBeenCalled();
+        },
+      );
+
+      it('returns 403 when an admin rejects their own user', async () => {
+        await expect(service.rejectUser(ADMIN_ID, admin())).rejects.toMatchObject(
+          { status: 403 },
+        );
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+        expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('deactivateUser', () => {
+      it('deactivates an ACTIVE user, keeps approval, and revokes refresh sessions', async () => {
+        prisma.user.findUnique.mockResolvedValue(
+          userRecord({ status: 'DEACTIVATED' }),
+        );
+
+        const result = await service.deactivateUser(USER_ID, admin());
+
+        expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+        expect(statusUpdate().where).toEqual({
+          id: USER_ID,
+          status: 'ACTIVE',
+        });
+        expect(statusUpdate().data).toEqual({ status: 'DEACTIVATED' });
+        expect(statusUpdate().data).not.toHaveProperty('approvedAt');
+        expect(statusUpdate().data).not.toHaveProperty('approvedById');
+        expect(sessionRevocation().where).toEqual({
+          userId: USER_ID,
+          revokedAt: null,
+        });
+        expect(result).toEqual(safeUser('DEACTIVATED'));
+        expect(result).not.toHaveProperty('passwordHash');
+        expect(result).not.toHaveProperty('refreshSessions');
+        expectNoSessionDeletion();
+      });
+
+      it('returns 404 when the user does not exist', async () => {
+        prisma.user.updateMany.mockResolvedValue({ count: 0 });
+        prisma.user.findUnique.mockResolvedValue(null);
+
+        await expect(
+          service.deactivateUser(USER_ID, admin()),
+        ).rejects.toMatchObject({
+          status: 404,
+          message: 'User not found.',
+        });
+        expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      });
+
+      it.each(['PENDING', 'REJECTED', 'DEACTIVATED'])(
+        'returns 409 when the user is %s',
+        async (status) => {
+          prisma.user.updateMany.mockResolvedValue({ count: 0 });
+          prisma.user.findUnique.mockResolvedValue(userRecord({ status }));
+
+          await expect(
+            service.deactivateUser(USER_ID, admin()),
+          ).rejects.toMatchObject({
+            status: 409,
+            message: 'User cannot be deactivated from the current status.',
+          });
+          expect(statusUpdate().where.status).toBe('ACTIVE');
+          expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+          expect(prisma.user.update).not.toHaveBeenCalled();
+        },
+      );
+
+      it('returns 403 when an admin deactivates their own user', async () => {
+        await expect(
+          service.deactivateUser(ADMIN_ID, admin()),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+        expect(prisma.$transaction).not.toHaveBeenCalled();
+      });
+    });
+
+    it('does not apply a status change after a concurrent transition', async () => {
+      prisma.user.updateMany.mockResolvedValue({ count: 0 });
+      prisma.user.findUnique.mockResolvedValue(userRecord({ status: 'ACTIVE' }));
+
+      await expect(service.approveUser(USER_ID, admin())).rejects.toMatchObject({
+        status: 409,
+      });
+      await expect(service.rejectUser(USER_ID, admin())).rejects.toMatchObject({
+        status: 409,
+      });
+      prisma.user.findUnique.mockResolvedValue(
+        userRecord({ status: 'DEACTIVATED' }),
+      );
+      await expect(
+        service.deactivateUser(USER_ID, admin()),
+      ).rejects.toMatchObject({ status: 409 });
+
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(prisma.user.updateMany.mock.calls.map((call) => call[0].where)).toEqual(
+        [
+          { id: USER_ID, status: 'PENDING' },
+          { id: USER_ID, status: 'PENDING' },
+          { id: USER_ID, status: 'ACTIVE' },
+        ],
+      );
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
+      expectNoSessionDeletion();
+    });
+
+    it('propagates unrelated database errors', async () => {
+      const failure = new Error('database unavailable');
+      prisma.user.updateMany.mockRejectedValue(failure);
+
+      await expect(service.approveUser(USER_ID, admin())).rejects.toBe(failure);
+      await expect(service.rejectUser(USER_ID, admin())).rejects.toBe(failure);
+      await expect(service.deactivateUser(USER_ID, admin())).rejects.toBe(
+        failure,
+      );
+      expect(prisma.refreshSession.updateMany).not.toHaveBeenCalled();
     });
   });
 });

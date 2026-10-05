@@ -11,6 +11,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { AccessTokenGuard } from '../auth/access-token.guard.js';
+import type { CurrentUserContext } from '../auth/current-user.js';
 import { ROLES_KEY } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { TokenService } from '../auth/token.service.js';
@@ -24,6 +25,11 @@ import { UsersController } from './users.controller.js';
 import { UsersService } from './users.service.js';
 
 const USER_ID = '11111111-1111-4111-8111-111111111111';
+const currentUser: CurrentUserContext = {
+  id: '22222222-2222-4222-8222-222222222222',
+  organizationId: '33333333-3333-4333-8333-333333333333',
+  role: 'ADMIN',
+};
 
 const userResponse: UserResponse = {
   id: USER_ID,
@@ -41,6 +47,9 @@ describe('UsersController', () => {
     listUsers: vi.fn(),
     getUserById: vi.fn(),
     createUser: vi.fn(),
+    approveUser: vi.fn(),
+    rejectUser: vi.fn(),
+    deactivateUser: vi.fn(),
   };
 
   async function controller(): Promise<UsersController> {
@@ -59,6 +68,9 @@ describe('UsersController', () => {
     users.listUsers.mockReset().mockResolvedValue({ users: [userResponse] });
     users.getUserById.mockReset().mockResolvedValue(userResponse);
     users.createUser.mockReset().mockResolvedValue(userResponse);
+    users.approveUser.mockReset().mockResolvedValue(userResponse);
+    users.rejectUser.mockReset().mockResolvedValue(userResponse);
+    users.deactivateUser.mockReset().mockResolvedValue(userResponse);
   });
 
   it('delegates GET /users to UsersService with the list query', async () => {
@@ -119,6 +131,75 @@ describe('UsersController', () => {
     );
     expect(
       Reflect.getMetadata(METHOD_METADATA, UsersController.prototype.create),
+    ).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+  });
+
+  it('delegates POST /users/:id/approve to UsersService', async () => {
+    const approved = { ...userResponse, status: 'ACTIVE' as const };
+    users.approveUser.mockResolvedValue(approved);
+
+    await expect(
+      (await controller()).approve(USER_ID, currentUser),
+    ).resolves.toEqual(approved);
+    expect(users.approveUser).toHaveBeenCalledWith(USER_ID, currentUser);
+    expect(
+      Reflect.getMetadata(PATH_METADATA, UsersController.prototype.approve),
+    ).toBe(':id/approve');
+    expect(
+      Reflect.getMetadata(METHOD_METADATA, UsersController.prototype.approve),
+    ).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+  });
+
+  it('delegates POST /users/:id/reject to UsersService', async () => {
+    const rejected = { ...userResponse, status: 'REJECTED' as const };
+    users.rejectUser.mockResolvedValue(rejected);
+
+    await expect(
+      (await controller()).reject(USER_ID, currentUser),
+    ).resolves.toEqual(rejected);
+    expect(users.rejectUser).toHaveBeenCalledWith(USER_ID, currentUser);
+    expect(
+      Reflect.getMetadata(PATH_METADATA, UsersController.prototype.reject),
+    ).toBe(':id/reject');
+    expect(
+      Reflect.getMetadata(METHOD_METADATA, UsersController.prototype.reject),
+    ).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+  });
+
+  it('delegates POST /users/:id/deactivate to UsersService', async () => {
+    const deactivated = { ...userResponse, status: 'DEACTIVATED' as const };
+    users.deactivateUser.mockResolvedValue(deactivated);
+
+    await expect(
+      (await controller()).deactivate(USER_ID, currentUser),
+    ).resolves.toEqual(deactivated);
+    expect(users.deactivateUser).toHaveBeenCalledWith(USER_ID, currentUser);
+    expect(
+      Reflect.getMetadata(
+        PATH_METADATA,
+        UsersController.prototype.deactivate,
+      ),
+    ).toBe(':id/deactivate');
+    expect(
+      Reflect.getMetadata(
+        METHOD_METADATA,
+        UsersController.prototype.deactivate,
+      ),
     ).toBe(RequestMethod.POST);
     expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
     expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([

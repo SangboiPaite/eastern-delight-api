@@ -1,9 +1,11 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '../../generated/prisma/client.js';
+import type { CurrentUserContext } from '../auth/current-user.js';
 import { normalizeMobile } from '../auth/normalize-mobile.js';
 import { PasswordService } from '../auth/password.service.js';
 import { PrismaService } from '../database/prisma.service.js';
@@ -15,6 +17,11 @@ import type {
 } from './dto/user-response.dto.js';
 
 const MOBILE_ALREADY_REGISTERED = 'Mobile number is already registered.';
+const USER_NOT_FOUND = 'User not found.';
+const CANNOT_APPROVE = 'User cannot be approved from the current status.';
+const CANNOT_REJECT = 'User cannot be rejected from the current status.';
+const CANNOT_DEACTIVATE =
+  'User cannot be deactivated from the current status.';
 
 const USER_READ_SELECT = {
   id: true,
@@ -59,6 +66,63 @@ function isUserMobileConflict(error: unknown): boolean {
   return target === 'mobile';
 }
 
+type UserStatus = UserResponse['status'];
+
+type StatusChangeData = {
+  status: UserStatus;
+  approvedAt?: Date | null;
+  approvedById?: string | null;
+};
+
+type UserStatusDelegate = {
+  updateMany(args: {
+    where: { id: string; status: UserStatus };
+    data: StatusChangeData;
+  }): Promise<{ count: number }>;
+  findUnique(args: {
+    where: { id: string };
+    select: typeof USER_READ_SELECT | { id: true };
+  }): Promise<UserReadRecord | { id: string } | null>;
+};
+
+function assertActorIsNotTarget(targetId: string, actorId: string): void {
+  if (targetId === actorId) {
+    throw new ForbiddenException();
+  }
+}
+
+async function changeUserStatus(
+  user: UserStatusDelegate,
+  id: string,
+  expectedStatus: UserStatus,
+  data: StatusChangeData,
+  conflictMessage: string,
+): Promise<UserReadRecord> {
+  const updated = await user.updateMany({
+    where: { id, status: expectedStatus },
+    data,
+  });
+  if (updated.count !== 1) {
+    const existing = await user.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!existing) {
+      throw new NotFoundException(USER_NOT_FOUND);
+    }
+    throw new ConflictException(conflictMessage);
+  }
+
+  const changed = await user.findUnique({
+    where: { id },
+    select: USER_READ_SELECT,
+  });
+  if (!changed || !('name' in changed)) {
+    throw new NotFoundException(USER_NOT_FOUND);
+  }
+  return changed;
+}
+
 function toUserResponse(user: UserReadRecord): UserResponse {
   return {
     id: user.id,
@@ -98,8 +162,77 @@ export class UsersService {
       select: USER_READ_SELECT,
     });
     if (!user) {
-      throw new NotFoundException('User not found.');
+      throw new NotFoundException(USER_NOT_FOUND);
     }
+    return toUserResponse(user);
+  }
+
+  async approveUser(
+    id: string,
+    currentUser: CurrentUserContext,
+  ): Promise<UserResponse> {
+    assertActorIsNotTarget(id, currentUser.id);
+    const user = await changeUserStatus(
+      this.prisma.user,
+      id,
+      'PENDING',
+      {
+        status: 'ACTIVE',
+        approvedAt: new Date(),
+        approvedById: currentUser.id,
+      },
+      CANNOT_APPROVE,
+    );
+    return toUserResponse(user);
+  }
+
+  async rejectUser(
+    id: string,
+    currentUser: CurrentUserContext,
+  ): Promise<UserResponse> {
+    assertActorIsNotTarget(id, currentUser.id);
+    const revokedAt = new Date();
+    const user = await this.prisma.$transaction(async (tx) => {
+      const changed = await changeUserStatus(
+        tx.user,
+        id,
+        'PENDING',
+        {
+          status: 'REJECTED',
+          approvedAt: null,
+          approvedById: null,
+        },
+        CANNOT_REJECT,
+      );
+      await tx.refreshSession.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt },
+      });
+      return changed;
+    });
+    return toUserResponse(user);
+  }
+
+  async deactivateUser(
+    id: string,
+    currentUser: CurrentUserContext,
+  ): Promise<UserResponse> {
+    assertActorIsNotTarget(id, currentUser.id);
+    const revokedAt = new Date();
+    const user = await this.prisma.$transaction(async (tx) => {
+      const changed = await changeUserStatus(
+        tx.user,
+        id,
+        'ACTIVE',
+        { status: 'DEACTIVATED' },
+        CANNOT_DEACTIVATE,
+      );
+      await tx.refreshSession.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt },
+      });
+      return changed;
+    });
     return toUserResponse(user);
   }
 

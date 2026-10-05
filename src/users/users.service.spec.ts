@@ -1,4 +1,6 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '../../generated/prisma/client.js';
+import { PasswordService } from '../auth/password.service.js';
 import { PrismaService } from '../database/prisma.service.js';
 import { UsersService } from './users.service.js';
 
@@ -27,13 +29,26 @@ describe('UsersService', () => {
     user: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      create: vi.fn(),
     },
   };
-  const service = new UsersService(prisma as unknown as PrismaService);
+  const passwords = { hash: vi.fn() };
+  const service = new UsersService(
+    prisma as unknown as PrismaService,
+    passwords as unknown as PasswordService,
+  );
 
   beforeEach(() => {
     prisma.user.findMany.mockReset().mockResolvedValue([userRecord()]);
     prisma.user.findUnique.mockReset().mockResolvedValue(userRecord());
+    prisma.user.create.mockReset().mockResolvedValue(
+      userRecord({
+        status: 'PENDING',
+        passwordHash: 'hashed-password',
+        permissions: [{ service: 'BILLING' }, { service: 'PRODUCTS' }],
+      }),
+    );
+    passwords.hash.mockReset().mockResolvedValue('hashed-password');
   });
 
   function listQuery(): {
@@ -168,5 +183,163 @@ describe('UsersService', () => {
     expect(uniqueQuery().select).not.toHaveProperty('refreshSessions');
     expect(listed.users[0]).not.toHaveProperty('refreshSessions');
     expect(fetched).not.toHaveProperty('refreshSessions');
+  });
+
+  describe('createUser', () => {
+    function createCall(): {
+      data: {
+        name: string;
+        mobile: string;
+        passwordHash: string;
+        role: string;
+        status: string;
+        permissions?: { create: { service: string }[] };
+        approvedAt?: Date;
+        approvedById?: string;
+      };
+      select: Record<string, unknown>;
+    } {
+      return prisma.user.create.mock.calls[0]?.[0] as {
+        data: {
+          name: string;
+          mobile: string;
+          passwordHash: string;
+          role: string;
+          status: string;
+          permissions?: { create: { service: string }[] };
+          approvedAt?: Date;
+          approvedById?: string;
+        };
+        select: Record<string, unknown>;
+      };
+    }
+
+    it('creates a PENDING STAFF user when role is omitted', async () => {
+      const result = await service.createUser({
+        name: 'John',
+        mobile: '  9876543210  ',
+        password: '  secret  ',
+      });
+
+      expect(passwords.hash).toHaveBeenCalledWith('  secret  ');
+      expect(createCall().data).toEqual({
+        name: 'John',
+        mobile: '9876543210',
+        passwordHash: 'hashed-password',
+        role: 'STAFF',
+        status: 'PENDING',
+      });
+      expect(createCall().data).not.toHaveProperty('approvedAt');
+      expect(createCall().data).not.toHaveProperty('approvedById');
+      expect(createCall().data).not.toHaveProperty('permissions');
+      expectSafeSelect(createCall().select);
+      expect(result).toEqual({
+        id: USER_ID,
+        name: 'Ada',
+        mobile: '9876543210',
+        role: 'STAFF',
+        status: 'PENDING',
+        createdAt: CREATED_AT,
+        updatedAt: UPDATED_AT,
+        permissions: ['BILLING', 'PRODUCTS'],
+      });
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('refreshSessions');
+      expect(JSON.stringify(result)).not.toMatch(
+        /passwordHash|refreshSessions|tokenHash/,
+      );
+    });
+
+    it('creates a specified ADMIN user as PENDING', async () => {
+      await service.createUser({
+        name: 'John',
+        mobile: '9876543210',
+        password: 'secret',
+        role: 'ADMIN',
+      });
+
+      expect(createCall().data.role).toBe('ADMIN');
+      expect(createCall().data.status).toBe('PENDING');
+      expect(createCall().data).not.toHaveProperty('permissions');
+    });
+
+    it('stores the requested service permissions and no extras', async () => {
+      await service.createUser({
+        name: 'John',
+        mobile: '9876543210',
+        password: 'secret',
+        permissions: ['BILLING', 'PRODUCTS'],
+      });
+
+      expect(createCall().data.permissions).toEqual({
+        create: [{ service: 'BILLING' }, { service: 'PRODUCTS' }],
+      });
+      expect(createCall().data.status).toBe('PENDING');
+      expect(createCall().data.role).toBe('STAFF');
+    });
+
+    it('converts a duplicate mobile constraint to ConflictException', async () => {
+      const conflict = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed on the fields: (`mobile`)',
+        {
+          code: 'P2002',
+          clientVersion: '7.10.0',
+          meta: { modelName: 'User', target: ['mobile'] },
+        },
+      );
+      prisma.user.create.mockRejectedValue(conflict);
+
+      await expect(
+        service.createUser({
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      await expect(
+        service.createUser({
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        message: 'Mobile number is already registered.',
+      });
+    });
+
+    it('propagates unrelated Prisma errors', async () => {
+      const permissionConflict = new Prisma.PrismaClientKnownRequestError(
+        'Unique constraint failed',
+        {
+          code: 'P2002',
+          clientVersion: '7.10.0',
+          meta: {
+            modelName: 'UserServicePermission',
+            target: ['userId', 'service'],
+          },
+        },
+      );
+      prisma.user.create.mockRejectedValue(permissionConflict);
+
+      await expect(
+        service.createUser({
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+          permissions: ['BILLING'],
+        }),
+      ).rejects.toBe(permissionConflict);
+
+      const unavailable = new Error('database unavailable');
+      prisma.user.create.mockRejectedValue(unavailable);
+      await expect(
+        service.createUser({
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+        }),
+      ).rejects.toBe(unavailable);
+    });
   });
 });

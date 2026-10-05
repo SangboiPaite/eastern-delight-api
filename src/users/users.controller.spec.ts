@@ -14,6 +14,7 @@ import { AccessTokenGuard } from '../auth/access-token.guard.js';
 import { ROLES_KEY } from '../auth/roles.decorator.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { TokenService } from '../auth/token.service.js';
+import { CreateUserDto } from './dto/create-user.dto.js';
 import { ListUsersDto } from './dto/list-users.dto.js';
 import type {
   UserListResponse,
@@ -39,6 +40,7 @@ describe('UsersController', () => {
   const users = {
     listUsers: vi.fn(),
     getUserById: vi.fn(),
+    createUser: vi.fn(),
   };
 
   async function controller(): Promise<UsersController> {
@@ -56,6 +58,7 @@ describe('UsersController', () => {
   beforeEach(() => {
     users.listUsers.mockReset().mockResolvedValue({ users: [userResponse] });
     users.getUserById.mockReset().mockResolvedValue(userResponse);
+    users.createUser.mockReset().mockResolvedValue(userResponse);
   });
 
   it('delegates GET /users to UsersService with the list query', async () => {
@@ -97,6 +100,32 @@ describe('UsersController', () => {
       RolesGuard,
     ]);
   });
+
+  it('delegates POST /users to UsersService with the create DTO', async () => {
+    const dto = {
+      name: 'John',
+      mobile: '9876543210',
+      password: '  secret  ',
+      role: 'ADMIN' as const,
+      permissions: ['BILLING' as const, 'PRODUCTS' as const],
+    };
+    const created = { ...userResponse, status: 'PENDING' as const };
+    users.createUser.mockResolvedValue(created);
+
+    await expect((await controller()).create(dto)).resolves.toEqual(created);
+    expect(users.createUser).toHaveBeenCalledWith(dto);
+    expect(Reflect.getMetadata(PATH_METADATA, UsersController.prototype.create)).toBe(
+      '/',
+    );
+    expect(
+      Reflect.getMetadata(METHOD_METADATA, UsersController.prototype.create),
+    ).toBe(RequestMethod.POST);
+    expect(Reflect.getMetadata(ROLES_KEY, UsersController)).toEqual(['ADMIN']);
+    expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toEqual([
+      AccessTokenGuard,
+      RolesGuard,
+    ]);
+  });
 });
 
 describe('ListUsersDto', () => {
@@ -129,6 +158,129 @@ describe('ListUsersDto', () => {
     ).rejects.toBeDefined();
     await expect(
       pipe.transform({ role: 'STAFF', extra: '1' }, metadata),
+    ).rejects.toBeDefined();
+  });
+});
+
+describe('CreateUserDto', () => {
+  const pipe = new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  });
+  const metadata: ArgumentMetadata = {
+    type: 'body',
+    metatype: CreateUserDto,
+  };
+
+  it('accepts a STAFF user and keeps the password unchanged', async () => {
+    const dto = (await pipe.transform(
+      {
+        name: 'John',
+        mobile: '9876543210',
+        password: '  secret  ',
+      },
+      metadata,
+    )) as CreateUserDto;
+
+    expect(dto.name).toBe('John');
+    expect(dto.mobile).toBe('9876543210');
+    expect(dto.password).toBe('  secret  ');
+    expect(dto.role).toBeUndefined();
+    expect(dto.permissions).toBeUndefined();
+  });
+
+  it('accepts an ADMIN user with service permissions', async () => {
+    const dto = (await pipe.transform(
+      {
+        name: 'John',
+        mobile: '9876543210',
+        password: 'secret',
+        role: 'ADMIN',
+        permissions: ['BILLING', 'PRODUCTS'],
+      },
+      metadata,
+    )) as CreateUserDto;
+
+    expect(dto.role).toBe('ADMIN');
+    expect(dto.permissions).toEqual(['BILLING', 'PRODUCTS']);
+  });
+
+  it('rejects an invalid role or permission', async () => {
+    await expect(
+      pipe.transform(
+        {
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+          role: 'admin',
+        },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        {
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+          permissions: ['BILLING', 'INVOICES'],
+        },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        {
+          name: 'John',
+          mobile: '9876543210',
+          password: 'secret',
+          permissions: ['BILLING', 'BILLING'],
+        },
+        metadata,
+      ),
+    ).rejects.toBeDefined();
+  });
+
+  it('rejects unknown fields and protected user fields', async () => {
+    const body = {
+      name: 'John',
+      mobile: '9876543210',
+      password: 'secret',
+    };
+
+    await expect(
+      pipe.transform({ ...body, extra: true }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ ...body, status: 'ACTIVE' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ ...body, approvedAt: '2026-01-01' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ ...body, approvedById: USER_ID }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ ...body, passwordHash: 'hash' }, metadata),
+    ).rejects.toBeDefined();
+  });
+
+  it('rejects a missing name, mobile, or password', async () => {
+    await expect(
+      pipe.transform({ mobile: '9876543210', password: 'secret' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ name: 'John', password: 'secret' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform({ name: 'John', mobile: '9876543210' }, metadata),
+    ).rejects.toBeDefined();
+    await expect(
+      pipe.transform(
+        { name: '', mobile: '9876543210', password: 'secret' },
+        metadata,
+      ),
     ).rejects.toBeDefined();
   });
 });

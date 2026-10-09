@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from './access-token.guard.js';
 import { AuthService } from './auth.service.js';
 import type {
@@ -16,11 +17,13 @@ export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   @Post('login')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   login(@Body() dto: LoginDto): Promise<AuthTokenResponse> {
     return this.auth.login(dto);
   }
 
   @Post('refresh')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   refresh(@Body() dto: RefreshTokenDto): Promise<AuthTokenResponse> {
     return this.auth.refresh(dto);
   }

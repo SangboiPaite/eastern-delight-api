@@ -156,4 +156,36 @@ describe('AuthController', () => {
     await expect(controller.me(currentUser)).resolves.toEqual(response);
     expect(auth.getCurrentUser).toHaveBeenCalledWith(currentUser);
   });
+
+  it('tightens login and refresh limits and leaves logout on the global limit', () => {
+    expect(
+      Reflect.getMetadata('THROTTLER:LIMITdefault', AuthController.prototype.login),
+    ).toBe(5);
+    expect(
+      Reflect.getMetadata('THROTTLER:TTLdefault', AuthController.prototype.login),
+    ).toBe(60_000);
+    expect(
+      Reflect.getMetadata(
+        'THROTTLER:LIMITdefault',
+        AuthController.prototype.refresh,
+      ),
+    ).toBe(10);
+    expect(
+      Reflect.getMetadata('THROTTLER:TTLdefault', AuthController.prototype.refresh),
+    ).toBe(60_000);
+    for (const route of ['logout', 'me'] as const) {
+      expect(
+        Reflect.getMetadata(
+          'THROTTLER:LIMITdefault',
+          AuthController.prototype[route],
+        ),
+      ).toBeUndefined();
+      expect(
+        Reflect.getMetadata(
+          'THROTTLER:TTLdefault',
+          AuthController.prototype[route],
+        ),
+      ).toBeUndefined();
+    }
+  });
 });

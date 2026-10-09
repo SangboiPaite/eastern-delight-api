@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthModule } from './auth/auth.module.js';
@@ -18,6 +20,13 @@ import { UsersModule } from './users/users.module.js';
       cache: true,
       load: [loadConfiguration],
     }),
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        limit: 100,
+        ttl: 60_000,
+      },
+    ]),
     DatabaseModule,
     AuthModule,
     UsersModule,
@@ -27,6 +36,12 @@ import { UsersModule } from './users/users.module.js';
     InvoicesModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

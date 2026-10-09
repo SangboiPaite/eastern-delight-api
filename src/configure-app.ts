@@ -15,5 +15,6 @@ export function configureApp(app: INestApplication): INestApplication {
       transform: true,
     }),
   );
+  app.getHttpAdapter().getInstance().set('trust proxy', 'loopback');
   return app;
 }
